@@ -1,27 +1,18 @@
 import streamlit as st
 import cv2
 import tempfile
+import av
 import numpy as np
 from ultralytics import YOLO
-import time
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(
-    page_title="Canteen Queue AI",
-    page_icon="🍽️",
-    layout="wide"
-)
-
-# --- SIDEBAR SETTINGS ---
-st.sidebar.title("Settings")
-model_path = "best.pt"  # Make sure this file is in the same folder
-confidence = st.sidebar.slider("Model Confidence", 0.0, 1.0, 0.4, 0.05)
-service_time = st.sidebar.number_input("Avg Service Time (min)", value=2.0)
+st.set_page_config(page_title="Canteen Queue AI", page_icon="🍽️", layout="wide")
 
 # --- LOAD MODEL ---
 @st.cache_resource
 def load_model():
-    return YOLO(model_path)
+    return YOLO("best.pt")
 
 try:
     model = load_model()
@@ -29,87 +20,95 @@ except Exception as e:
     st.error(f"Error loading model: {e}")
     st.stop()
 
-# --- MAIN INTERFACE ---
+# --- SIDEBAR SETTINGS ---
+st.sidebar.title("Settings")
+confidence = st.sidebar.slider("Model Confidence", 0.0, 1.0, 0.4, 0.05)
+service_time = st.sidebar.number_input("Avg Service Time (min)", value=2.0)
+source_radio = st.sidebar.radio("Select Source", ["Live Webcam", "Upload Video"])
+
 st.title("🍽️ Live Canteen Queue Forecaster")
 st.markdown("---")
 
-# Layout: 2 Columns
+# Layout
 col1, col2 = st.columns([0.7, 0.3])
 
-with col2:
-    st.header("Live Analytics")
-    kpi_queue = st.empty()
-    kpi_wait = st.empty()
-    status_text = st.empty()
+# --- GLOBAL VARIABLES FOR STATS ---
+# We use st.session_state to pass data from the video processor to the UI
+if 'person_count' not in st.session_state:
+    st.session_state.person_count = 0
 
-# --- VIDEO SOURCE SELECTION ---
-source_radio = st.sidebar.radio("Select Source", ["Upload Video", "Live Webcam"])
-
-cap = None
-temp_file_path = None
-
-if source_radio == "Upload Video":
-    uploaded_file = st.sidebar.file_uploader("Upload a video (mp4/avi)", type=['mp4', 'avi', 'mov'])
-    if uploaded_file is not None:
-        # Save to temp file because OpenCV needs a path
-        tfile = tempfile.NamedTemporaryFile(delete=False)
-        tfile.write(uploaded_file.read())
-        temp_file_path = tfile.name
-        cap = cv2.VideoCapture(temp_file_path)
-
-elif source_radio == "Live Webcam":
-    # 0 is the default webcam ID
-    cap = cv2.VideoCapture(0)
-
-# --- PROCESSING LOOP ---
-with col1:
-    st_frame = st.empty()  # Placeholder for the video
-
-    if cap:
-        stop_button = st.sidebar.button("Stop Processing")
+# --- WEBCAM PROCESSOR CLASS ---
+class VideoProcessor:
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
         
-        while cap.isOpened() and not stop_button:
-            success, frame = cap.read()
+        # 1. Run YOLO
+        results = model(img, conf=confidence, imgsz=320)
+        
+        # 2. Draw & Count
+        count = 0
+        for r in results:
+            img = r.plot()
+            count = len(r.boxes)
+        
+        # Store count in a global variable (hacky but works for simple apps)
+        st.session_state.person_count = count
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+# --- MAIN LOGIC ---
+with col1:
+    if source_radio == "Live Webcam":
+        st.write("Click 'START' to use your camera.")
+        ctx = webrtc_streamer(
+            key="example",
+            video_processor_factory=VideoProcessor,
+            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+            media_stream_constraints={"video": True, "audio": False}
+        )
+    
+    elif source_radio == "Upload Video":
+        uploaded_file = st.sidebar.file_uploader("Upload a video", type=['mp4', 'avi'])
+        if uploaded_file:
+            tfile = tempfile.NamedTemporaryFile(delete=False)
+            tfile.write(uploaded_file.read())
+            cap = cv2.VideoCapture(tfile.name)
             
-            if not success:
-                # Loop video if it's a file
-                if source_radio == "Upload Video":
+            st_frame = st.empty()
+            while cap.isOpened():
+                success, frame = cap.read()
+                if not success:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
-                else:
-                    st.warning("Camera disconnected or stream ended.")
-                    break
+                
+                # Inference
+                results = model(frame, conf=confidence, imgsz=320)
+                annotated_frame = frame
+                count = 0
+                for r in results:
+                    annotated_frame = r.plot()
+                    count = len(r.boxes)
+                
+                # Update State
+                st.session_state.person_count = count
+                
+                # Display
+                st_frame.image(annotated_frame, channels="BGR", use_container_width=True)
 
-            # 1. Inference
-            # Resize to 640 for standard speed, or 320 for faster
-            results = model(frame, conf=confidence, imgsz=640)
-            
-            # 2. Extract Data
-            person_count = 0
-            annotated_frame = frame
-            
-            for r in results:
-                annotated_frame = r.plot()
-                person_count = len(r.boxes)
-            
-            wait_time = person_count * service_time
-
-            # 3. Update Stats (Right Column)
-            kpi_queue.metric("Students in Queue", f"{person_count}")
-            
-            # Change color logic for wait time
-            if wait_time > 10:
-                kpi_wait.metric("Est. Wait Time", f"{wait_time:.1f} min", delta="- High Traffic", delta_color="inverse")
-            else:
-                kpi_wait.metric("Est. Wait Time", f"{wait_time:.1f} min", delta="Normal", delta_color="normal")
-
-            status_text.caption(f"Mode: {source_radio}")
-
-            # 4. Display Video
-            # OpenCV is BGR, Streamlit needs RGB
-            frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-            st_frame.image(frame_rgb, channels="RGB", use_container_width=True)
-
-        cap.release()
+# --- STATS DISPLAY (Updates Automatically) ---
+with col2:
+    st.header("Live Analytics")
+    
+    # Simple logic: If using Webrtc, we might need to rely on the last known count
+    # Note: Real-time stat updates from Webrtc to Streamlit UI are tricky.
+    # This basic version updates when you interact with the page.
+    
+    count = st.session_state.person_count
+    wait_time = count * service_time
+    
+    st.metric("Students in Queue", f"{count}")
+    
+    if wait_time > 10:
+        st.metric("Est. Wait Time", f"{wait_time:.1f} min", delta="- High Traffic", delta_color="inverse")
     else:
-        st.info("Please upload a video or select Live Webcam to start.")
+        st.metric("Est. Wait Time", f"{wait_time:.1f} min", delta="Normal")
