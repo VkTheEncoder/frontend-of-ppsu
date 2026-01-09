@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Canteen AI</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        body { background-color: #f0f2f5; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        
+        .header { background: #2c3e50; color: white; padding: 20px 0; margin-bottom: 30px; }
+        
+        .video-box {
+            background: black;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+            min-height: 480px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .control-panel {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+
+        .stat-box {
+            background: linear-gradient(135deg, #6dd5fa 0%, #2980b9 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            margin-bottom: 15px;
+        }
+        .stat-box.warning { background: linear-gradient(135deg, #f1c40f 0%, #d35400 100%); }
+        
+        .stat-number { font-size: 2.5rem; font-weight: bold; }
+        .mode-badge { position: absolute; top: 15px; left: 15px; background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 0.8rem; z-index: 10; }
+    </style>
+</head>
+<body>
+
+<div class="header text-center">
+    <h2><i class="fas fa-utensils"></i> Smart Canteen Queue Manager</h2>
+    <p class="mb-0">AI-Powered Wait Time Prediction</p>
+</div>
+
+<div class="container">
+    <div class="row">
+        <div class="col-lg-8 mb-4">
+            <div class="video-box position-relative">
+                <div class="mode-badge" id="modeDisplay">LIVE FEED</div>
+                <img id="videoStream" src="{{ url_for('video_feed') }}" width="100%" height="100%" style="object-fit: contain;">
+            </div>
+        </div>
+
+        <div class="col-lg-4">
+            
+            <div class="stat-box">
+                <h5>Queue Length</h5>
+                <div class="stat-number" id="personCount">0</div>
+                <small>People Detected</small>
+            </div>
+
+            <div class="stat-box warning">
+                <h5>Wait Time</h5>
+                <div class="stat-number" id="waitTime">0 min</div>
+                <small>Estimated</small>
+            </div>
+
+            <div class="control-panel">
+                <h5 class="mb-3 border-bottom pb-2">Source Control</h5>
+                
+                <button onclick="switchToLive()" class="btn btn-dark w-100 mb-3">
+                    <i class="fas fa-camera"></i> Use Live CCTV
+                </button>
+
+                <div class="text-center text-muted mb-2">- OR -</div>
+
+                <form id="uploadForm">
+                    <div class="mb-2">
+                        <input class="form-control" type="file" id="videoFile" name="file" accept=".mp4, .avi, .mov">
+                    </div>
+                    <button type="button" onclick="uploadVideo()" class="btn btn-primary w-100">
+                        <i class="fas fa-upload"></i> Upload & Play Video
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // 1. Function to Switch to Live Camera
+    function switchToLive() {
+        fetch('/switch_live', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            alert(data.message);
+            refreshStream(); // Important: Reload the image tag
+        });
+    }
+
+    // 2. Function to Upload Video
+    function uploadVideo() {
+        let fileInput = document.getElementById("videoFile");
+        if(fileInput.files.length === 0) {
+            alert("Please select a file first!");
+            return;
+        }
+
+        let formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+
+        fetch('/upload_video', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            alert(data.message);
+            refreshStream(); // Important: Reload the image tag
+        })
+        .catch(err => alert("Error uploading file"));
+    }
+
+    // 3. Helper to refresh the video stream element
+    // This forces the browser to disconnect and reconnect to the Flask stream
+    function refreshStream() {
+        let img = document.getElementById("videoStream");
+        // We add a random timestamp to bypass browser caching
+        img.src = "{{ url_for('video_feed') }}?t=" + new Date().getTime();
+    }
+
+    // 4. Update Stats Interval
+    setInterval(() => {
+        fetch('/stats')
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('personCount').innerText = data.person_count;
+            document.getElementById('waitTime').innerText = Math.round(data.wait_time) + " min";
+            document.getElementById('modeDisplay').innerText = data.mode.toUpperCase();
+        });
+    }, 1000);
+</script>
+
+</body>
+</html>
